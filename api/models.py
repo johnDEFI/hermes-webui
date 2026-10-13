@@ -9312,6 +9312,7 @@ def _load_cli_sessions_uncached(
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
     _with_completeness: bool = False,
+    _session_id: str | None = None,
 ) -> list | _CliSessionsLoadResult:
     cli_sessions = []
     projection_complete = True
@@ -9511,12 +9512,13 @@ def _load_cli_sessions_uncached(
         _deleted_webui_tombstone = frozenset()
     state_rows = read_importable_agent_session_rows(
         db_path,
-        limit=visible_session_limit if visible_session_limit is not None else (
+        limit=None if _session_id is not None else visible_session_limit if visible_session_limit is not None else (
             CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron'
             else WEBHOOK_PROJECT_CHIP_LIMIT if source_filter == 'webhook'
             else KANBAN_PROJECT_CHIP_LIMIT if source_filter == 'kanban'
             else CLI_VISIBLE_SESSION_LIMIT
         ),
+        **({"session_id": _session_id} if _session_id is not None else {}),
         log=logger,
         # Background sources have independent bounded passes below. Keeping them
         # out of this 20-row interactive window prevents a busy worker source
@@ -9527,7 +9529,7 @@ def _load_cli_sessions_uncached(
         exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
     )
-    if source_filter is None:
+    if source_filter is None and _session_id is None:
         # The interactive window above is a MIXED budget of assigned and
         # unassigned conversations, and it truncates by recency. Two bounded
         # recovery passes repair the two ways that loses a conversation:
@@ -10135,7 +10137,7 @@ def _load_cli_sessions_uncached(
             'is_cli_session': is_cli_session_row({**row, **_source_meta}),
         })
 
-    if source_filter is not None:
+    if source_filter is not None or _session_id is not None:
         return _result()
 
     def _optional_source_rows(label: str, **kwargs):
@@ -10365,6 +10367,35 @@ def _load_cli_sessions_uncached(
             logger.debug("Kanban sidebar second pass failed", exc_info=True)
 
     return _result()
+
+
+def get_cli_session_metadata(session_id: str, *, profile=None) -> dict:
+    """Single-profile SID lookup using the existing source/lineage projection.
+
+    Background sources retain their dedicated list projection as a fallback.
+    No Claude Code files are scanned here.
+    """
+    if not session_id or str(session_id).startswith(f'{CLAUDE_CODE_SOURCE}_'):
+        return {}
+    try:
+        from api.profiles import get_active_profile_name, get_hermes_home_for_profile
+        active_profile = get_active_profile_name() or 'default'
+        profile = profile or active_profile
+        home = Path(get_hermes_home_for_profile(profile)).expanduser().resolve()
+        # Match the list resolver's first home identity, including renamed root
+        # aliases: active home wins, then the legacy default-home alias.
+        if home == Path(get_hermes_home_for_profile(active_profile)).expanduser().resolve():
+            profile = active_profile
+        elif home == Path(get_hermes_home_for_profile('default')).expanduser().resolve():
+            profile = 'default'
+        rows = _load_cli_sessions_uncached(
+            home, home / 'state.db', profile,
+            include_claude_code=False, _session_id=session_id,
+        )
+        matches = [row for row in rows if row.get('session_id') == session_id]
+        return matches[0] if len(matches) == 1 else {}
+    except (OSError, sqlite3.Error, ValueError):
+        return {}
 
 
 def get_cli_sessions(

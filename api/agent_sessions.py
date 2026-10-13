@@ -690,6 +690,7 @@ def read_importable_agent_session_rows(
     project_assignment: str | None = None,
     project_ids: tuple[str, ...] | None = None,
     return_window_exhaustion: bool = False,
+    session_id: str | None = None,
 ) -> list[dict] | tuple[list[dict], bool]:
     """Return agent sessions projected as importable conversations.
 
@@ -857,6 +858,25 @@ def read_importable_agent_session_rows(
 
         where_clauses = ["s.source IS NOT NULL"]
         params: list[object] = []
+        if session_id is not None:
+            # Read the connected lineage, including branch markers, through the
+            # same projection used by the sidebar. UNION terminates cycles.
+            if 'parent_session_id' in session_cols:
+                where_clauses.append("""s.id IN (
+                    WITH RECURSIVE related(id) AS (
+                        SELECT id FROM sessions WHERE id = ?
+                        UNION
+                        SELECT child.id FROM sessions child JOIN related r
+                            ON child.parent_session_id = r.id
+                        UNION
+                        SELECT parent.id FROM sessions child JOIN related r
+                            ON child.id = r.id JOIN sessions parent
+                            ON parent.id = child.parent_session_id
+                    ) SELECT id FROM related
+                )""")
+            else:
+                where_clauses.append("s.id = ?")
+            params.append(session_id)
         if include_sources:
             included = tuple(str(source) for source in include_sources if source)
             if included:

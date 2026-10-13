@@ -1683,7 +1683,7 @@ def get_process_profile_home() -> Path:
     return _DEFAULT_HERMES_HOME
 
 
-def switch_profile(name: str, *, process_wide: bool = True) -> dict:
+def switch_profile(name: str, *, process_wide: bool = True, lightweight: bool = False) -> dict:
     """Switch the active profile.
 
     Validates the profile exists, updates process state, patches module caches,
@@ -1837,7 +1837,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
             default_workspace = str(Path.home())
 
     return {
-        'profiles': list_profiles_api(),
+        **({} if lightweight else {'profiles': list_profiles_api()}),
         'active': name,
         'is_default': _is_root_profile(name),
         'default_model': default_model,
@@ -1990,7 +1990,8 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
 
     for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
         try:
-            content = skill_md.read_text(encoding="utf-8")[:4000]
+            with skill_md.open(encoding="utf-8") as stream:
+                content = stream.read(4000)
             frontmatter, _ = parse_frontmatter(content)
             if not skill_matches_platform(frontmatter):
                 continue

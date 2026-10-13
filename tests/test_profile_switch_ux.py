@@ -18,7 +18,7 @@ class TestProfileSwitchSpinner:
     JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
     def _get_switch_fn(self):
-        idx = self.JS.find("async function switchToProfile(name) {")
+        idx = self.JS.find("async function _switchToProfileNow(name) {")
         assert idx != -1, "switchToProfile not found in panels.js"
         depth = 0
         for i, ch in enumerate(self.JS[idx:], idx):
@@ -83,7 +83,7 @@ class TestParallelizedFetches:
     JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
     def _get_switch_fn(self):
-        idx = self.JS.find("async function switchToProfile(name) {")
+        idx = self.JS.find("async function _switchToProfileNow(name) {")
         assert idx != -1
         depth = 0
         for i, ch in enumerate(self.JS[idx:], idx):
@@ -200,7 +200,7 @@ class TestParallelizedFetches:
         js = self.JS
         start = js.find("function _openProfileSwitchSessionBrowser(")
         assert start != -1
-        end = js.find("async function switchToProfile(", start)
+        end = js.find("async function _switchToProfileNow(", start)
         assert end != -1
         helper = js[start:end]
         assert "expandSidebar()" in helper, "desktop profile switches must uncollapse the sidebar"

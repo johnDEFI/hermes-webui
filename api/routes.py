@@ -8779,7 +8779,12 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
     if not session_id:
         return {}
     try:
-        for row in get_cli_sessions(all_profiles=all_profiles):
+        kwargs = {"all_profiles": all_profiles}
+        if not str(session_id).startswith("claude_code_"):
+            import inspect
+            if "include_claude_code" in inspect.signature(get_cli_sessions).parameters:
+                kwargs["include_claude_code"] = False
+        for row in get_cli_sessions(**kwargs):
             if row.get("session_id") == session_id:
                 return row
     except Exception:
@@ -9250,7 +9255,42 @@ def _load_branch_source_or_refuse(handler, sid: str):
     return source
 
 
+_CLI_IMPORT_REFRESH_CACHE: dict[tuple, tuple] = {}
+_CLI_IMPORT_REFRESH_LOCK = threading.Lock()
+
+
+def _cli_import_refresh_stamp(sid, profile):
+    """Conservative DB/WAL + sidecar identity; unknown always rereads.
+
+    The DB fingerprint also catches same-count tool metadata enrichment and
+    compression ancestors. Capture before reading and revalidate after saving.
+    """
+    if str(sid).startswith("claude_code_"):
+        return None
+    try:
+        from api.models import _sqlite_file_stat_cache_key
+        from api.profiles import get_hermes_home_for_profile, get_active_profile_name
+        home = Path(get_hermes_home_for_profile(profile or get_active_profile_name())).resolve()
+        db = home / "state.db"
+        if not db.is_file():
+            return None
+        stat = (SESSION_DIR / f"{sid}.json").stat()
+        db_stamp = _sqlite_file_stat_cache_key(db)
+        if db_stamp[0] is None:
+            return None
+        return (str(home), db_stamp,
+                (stat.st_ino, stat.st_mtime_ns, stat.st_size))
+    except (OSError, ValueError):
+        return None
+
+
 def _resolve_cli_import_metadata(session_id: str, *, requested_profile=None, allow_all_profiles: bool = False) -> dict:
+    # Preserve unqualified cross-profile admission before any foreign DB read.
+    if allow_all_profiles or not requested_profile or _profiles_match(requested_profile, _get_active_profile_name()):
+        from api.models import get_cli_session_metadata
+        cli_meta = get_cli_session_metadata(session_id, profile=requested_profile)
+        if cli_meta:
+            return cli_meta
     cli_meta = _lookup_cli_session_metadata(session_id)
     if cli_meta and (not requested_profile or _profiles_match(cli_meta.get("profile"), requested_profile)):
         return cli_meta
@@ -17977,7 +18017,7 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Profile is bound to the current session", 403)
             # process_wide=False: don't mutate the process-global _active_profile.
             # Per-client profile is managed via cookie + thread-local (#798).
-            result = switch_profile(name, process_wide=False)
+            result = switch_profile(name, process_wide=False, lightweight=True) if body.get("lightweight") is True else switch_profile(name, process_wide=False)
             # Invalidate the models cache so the very next /api/models request
             # rebuilds from the new profile's config.yaml rather than returning
             # the old profile's cached model list (#1200 — profile-switch model bug).
@@ -17986,7 +18026,7 @@ def handle_post(handler, parsed) -> bool:
             invalidate_models_cache(delete_disk=False)
             try:
                 from api.gateway_watcher import restart_watcher_for_profile
-                restart_watcher_for_profile(name)
+                restart_watcher_for_profile(name, reuse_if_unchanged=True)
             except Exception as exc:
                 logger.warning("Failed to restart gateway watcher for profile %s: %s", name, exc)
             session_cookie_value = getattr(handler, '_trusted_auth_session_cookie_value', None)
@@ -31054,7 +31094,14 @@ def _handle_session_import_cli(handler, body):
             requested_profile=refresh_profile,
             allow_all_profiles=allow_all_profiles,
         )
-        fresh_msgs = get_cli_session_messages(
+        refresh_key = (str(refresh_profile or ""), sid)
+        refresh_stamp = _cli_import_refresh_stamp(sid, refresh_profile)
+        with _CLI_IMPORT_REFRESH_LOCK:
+            cached_refresh = _CLI_IMPORT_REFRESH_CACHE.get(refresh_key)
+            unchanged = (refresh_stamp is not None and cached_refresh is not None
+                         and cached_refresh[0] == refresh_stamp
+                         and time.monotonic() < cached_refresh[1])
+        fresh_msgs = None if unchanged else get_cli_session_messages(
             sid,
             profile=(cli_meta or {}).get("profile") or refresh_profile,
         )
@@ -31107,6 +31154,13 @@ def _handle_session_import_cli(handler, body):
                 "session_import_cli",
                 profile=getattr(existing, "profile", None),
             )
+        if fresh_msgs and refresh_stamp is not None:
+            after = _cli_import_refresh_stamp(sid, refresh_profile)
+            if after is not None and after[:2] == refresh_stamp[:2]:
+                with _CLI_IMPORT_REFRESH_LOCK:
+                    if len(_CLI_IMPORT_REFRESH_CACHE) >= 256:
+                        _CLI_IMPORT_REFRESH_CACHE.pop(next(iter(_CLI_IMPORT_REFRESH_CACHE)))
+                    _CLI_IMPORT_REFRESH_CACHE[refresh_key] = (after, time.monotonic() + 30.0)
         return j(
             handler,
             {

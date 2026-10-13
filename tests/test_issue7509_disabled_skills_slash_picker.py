@@ -313,7 +313,7 @@ def test_both_profile_switch_paths_drop_the_slash_skill_caches():
     once the switch is done.
     """
     for label, source, function_name in (
-        ("panels.switchToProfile", PANELS_JS, "switchToProfile"),
+        ("panels.switchToProfile", PANELS_JS, "_switchToProfileNow"),
         ("sessions._switchProfileForSessionLoad", SESSIONS_JS, "_switchProfileForSessionLoad"),
     ):
         body = _top_level_function_body(source, function_name)

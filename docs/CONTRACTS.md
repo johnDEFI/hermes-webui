@@ -141,6 +141,10 @@ Proposed RFCs are review guardrails, not implementation authorization. Do not
 implement RFC fragments unless the task or tracking issue explicitly asks for
 that slice.
 
+- [`docs/architecture/session-switch-paths.md`](architecture/session-switch-paths.md):
+  SID import lookup, refresh fingerprints, lightweight profile responses,
+  per-call skill mtime probes, and sidebar request ordering.
+
 ## UI, UX, and theme contracts
 
 - [`DESIGN.md`](../DESIGN.md): design tokens and the current calm-console
