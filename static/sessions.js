@@ -2266,12 +2266,17 @@ function _sessionProfileMismatchFromError(e){
 async function _switchProfileForSessionLoad(profile){
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
+  if(typeof switchToProfile==='function'){
+    const switched=await switchToProfile(name,{openingExistingSession:true});
+    if(switched===false) throw new Error('profile switch failed');
+    return;
+  }
   if(name===S.activeProfile) return;
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
   try{
-    const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
+    const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name,lightweight:true}),timeoutToast:false});
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
@@ -3059,6 +3064,7 @@ async function loadSession(sid){
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
+  if (_isCurrentLoad() && typeof _flushSidebarProfileRefresh==='function') _flushSidebarProfileRefresh();
   if (_isCurrentLoad()) _loadingSessionId = null;
 
   // Re-acknowledge the visit after the async message-load gap. A deferred
@@ -3165,39 +3171,78 @@ function _sidebarSessionProfileName(session){
   return raw||'';
 }
 
+const _sidebarOpenFlights = new Map();
+const _externalImportFlights = new Map();
+let _latestSidebarOpen = null;
+
+function _sidebarOpenKey(session){
+  return JSON.stringify([_sidebarSessionProfileName(session)||S.activeProfile||'default', session.session_id]);
+}
+
+function _importExternalSession(session){
+  const key=_sidebarOpenKey(session);
+  if(_externalImportFlights.has(key)) return _externalImportFlights.get(key);
+  const request=api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});
+  const flight=Promise.resolve(request).finally(()=>{
+    if(_externalImportFlights.get(key)===flight) _externalImportFlights.delete(key);
+  });
+  _externalImportFlights.set(key,flight);
+  return flight;
+}
+
 async function _ensureSidebarSessionProfile(session){
   const targetProfile=_sidebarSessionProfileName(session);
   if(!_showAllProfiles||!targetProfile) return false;
   const activeProfile=S.activeProfile||'default';
-  if(_profileMatchesActiveProfile(targetProfile,activeProfile)) return false;
+  if(_profileMatchesActiveProfile(targetProfile,activeProfile) && (typeof _profileSwitchTail==='undefined'||!_profileSwitchTail)) return false;
   if(typeof switchToProfile!=='function') return false;
-  _profileSwitchOpeningExistingSession=true;
-  try{
-    await switchToProfile(targetProfile);
-  }finally{
-    _profileSwitchOpeningExistingSession=false;
-  }
+  await switchToProfile(targetProfile, {openingExistingSession:true});
   return _profileMatchesActiveProfile(targetProfile,S.activeProfile||'default');
 }
 
-async function _openSidebarSession(session, loadOpts={}){
-  if(!session||!session.session_id) return;
+function _openSidebarSession(session, loadOpts={}){
+  if(!session||!session.session_id) return Promise.resolve();
   // Extension pre-open hook — before any side-effects (external import, profile switching).
   // Handler returns {cancel:true} to prevent the open.
   if(!loadOpts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
     if(_preResult&&_preResult.cancel===true) return;
   }
-  // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
-  if(typeof closeMobileSidebar==='function')closeMobileSidebar();
-  if(_isExternalSession(session)){
-    try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
-    catch(_e){ /* import failed -- fall through to read-only view */ }
+  const key=_sidebarOpenKey(session);
+  const previous=_sidebarOpenFlights.get(key);
+  if(previous && _latestSidebarOpen===previous) return previous.promise;
+  const entry={promise:null};
+  _latestSidebarOpen=entry;
+  // Invalidate an older transcript fetch at click time, before import/switch awaits.
+  ++_loadSessionGeneration;
+  _loadingSessionId=null;
+  const rows=typeof document!=='undefined'?document.querySelectorAll('.session-item[data-sid]'):[];
+  for(const row of rows){
+    const selected=row.dataset.sid===session.session_id;
+    row.classList.toggle('active',selected);
+    row.classList.toggle('loading',selected);
   }
-  await _ensureSidebarSessionProfile(session);
-  // Tell loadSession to skip its pre-hook — we already ran it above.
-  await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
-  renderSessionListFromCache();
+  if(typeof closeMobileSidebar==='function')closeMobileSidebar();
+  entry.promise=(async()=>{
+    if(_isExternalSession(session)){
+      try{await _importExternalSession(session);}
+      catch(_e){ /* import failed -- fall through to read-only view */ }
+    }
+    if(_latestSidebarOpen!==entry) return;
+    await _ensureSidebarSessionProfile(session);
+    if(_latestSidebarOpen!==entry) return;
+    await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
+    if(_latestSidebarOpen!==entry) return;
+    // Transcript first: fetch list/panels only after loadSession's initial render.
+    if(typeof _flushSidebarProfileRefresh==='function') _flushSidebarProfileRefresh();
+    renderSessionListFromCache();
+  })().finally(()=>{
+    if(_sidebarOpenFlights.get(key)===entry) _sidebarOpenFlights.delete(key);
+    if(_latestSidebarOpen===entry) for(const row of rows) row.classList.remove('loading');
+    if(_latestSidebarOpen===entry && typeof _flushSidebarProfileRefresh==='function') _flushSidebarProfileRefresh();
+  });
+  _sidebarOpenFlights.set(key,entry);
+  return entry.promise;
 }
 
 function _isReadOnlySession(session) {
@@ -7300,7 +7345,7 @@ function startGatewaySSE(){
               // Capture active session ID before async fetch — race guard.
               // If the user switches sessions while the fetch is in-flight, discard the result.
               const activeSid = S.session.session_id;
-              api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(S.session))})
+              _importExternalSession(S.session)
                 .then(res=>{
                   if(!S.session || S.session.session_id !== activeSid) return;
                   if(res && res.session && Array.isArray(res.session.messages)){
@@ -10089,7 +10134,7 @@ function renderSessionListFromCache(){
       _lastTapTime=now;
       clearTimeout(_tapTimer);
       const delay=pointerType==='mouse'?0:300;
-      if(pointerType!=='mouse') el.classList.add('loading');
+      el.classList.add('loading');
       _tapTimer=setTimeout(async()=>{
         _tapTimer=null;
         _lastTapTime=0;

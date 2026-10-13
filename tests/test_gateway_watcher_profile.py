@@ -317,7 +317,7 @@ def test_profile_switch_restarts_watcher_best_effort(monkeypatch):
     monkeypatch.setattr(profiles, "_validate_profile_name", lambda name: None)
     monkeypatch.setattr(profiles, "switch_profile", lambda name, process_wide=False: {"ok": True, "name": name})
     monkeypatch.setattr(config, "invalidate_models_cache", lambda **kw: calls.append(("cache", kw)))
-    monkeypatch.setattr(gateway_watcher, "restart_watcher_for_profile", lambda name: calls.append(("watcher", name)))
+    monkeypatch.setattr(gateway_watcher, "restart_watcher_for_profile", lambda name, **kwargs: calls.append(("watcher", name)))
 
     handler = _FakeHandler()
     routes.handle_post(handler, urlparse("/api/profile/switch"))
@@ -339,7 +339,7 @@ def test_profile_switch_response_survives_watcher_restart_failure(monkeypatch):
     monkeypatch.setattr(
         gateway_watcher,
         "restart_watcher_for_profile",
-        lambda name: (_ for _ in ()).throw(RuntimeError("restart failed")),
+        lambda name, **kwargs: (_ for _ in ()).throw(RuntimeError("restart failed")),
     )
 
     handler = _FakeHandler()

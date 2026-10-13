@@ -190,6 +190,18 @@ def _get_agent_sessions_from_db(db_path: Path | None = None) -> list | None:
 
 # ── GatewayWatcher ──────────────────────────────────────────────────────────
 
+def _watcher_config_identity(home: Path | None):
+    if home is None:
+        return None
+    try:
+        stat = (home / "config.yaml").stat()
+        return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    except FileNotFoundError:
+        return ("missing",)
+    except OSError:
+        return None
+
+
 class GatewayWatcher:
     """Background thread that polls state.db for agent session changes.
 
@@ -232,6 +244,7 @@ class GatewayWatcher:
             else _get_state_db_path(self._hermes_home) if self._hermes_home is not None else _get_state_db_path()
         )
         self.profile_name = profile_name or ""
+        self._config_identity = _watcher_config_identity(self._hermes_home)
         self._last_hash: str = ''
         self._last_sessions: list = []
         # Cheap sessions-only fingerprint from the previous poll. When it is
@@ -524,12 +537,21 @@ def stop_watcher(*, profile_name: str | None = None, hermes_home: Path | None = 
         watcher.stop()
 
 
-def restart_watcher_for_profile(name: str):
+def restart_watcher_for_profile(name: str, *, reuse_if_unchanged: bool = False):
     """Restart only the watcher pinned to the target profile home."""
     from api.profiles import get_hermes_home_for_profile
 
     hermes_home = Path(get_hermes_home_for_profile(name)).expanduser().resolve()
     key = _watcher_registry_key(name, hermes_home)
+    if reuse_if_unchanged:
+        identity = _watcher_config_identity(hermes_home)
+        with _watcher_lock:
+            existing = _watchers.get(key)
+            if (existing is not None and existing.is_alive()
+                    and existing._hermes_home == hermes_home
+                    and identity is not None
+                    and getattr(existing, "_config_identity", None) == identity):
+                return existing
     watcher = GatewayWatcher(profile_name=name, hermes_home=hermes_home)
     watcher.start()
     with _watcher_lock:

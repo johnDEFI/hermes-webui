@@ -7071,7 +7071,36 @@ function _openProfileSwitchSessionBrowser(){
   }catch(_){}
 }
 
-async function switchToProfile(name) {
+let _profileSwitchTail = null;
+let _deferredSidebarProfileRefresh = null;
+
+function switchToProfile(name, opts={}) {
+  // Only share the tail: A -> B -> A must leave the cookie on the final A.
+  if(_profileSwitchTail && _profileSwitchTail.name===name) return _profileSwitchTail.promise;
+  const predecessor=_profileSwitchTail;
+  const entry={name,promise:null};
+  const requestOpts=Object.assign({}, opts, {openingExistingSession:!!opts.openingExistingSession});
+  entry.promise=(predecessor?predecessor.promise.catch(()=>{}):Promise.resolve())
+    .then(()=>_switchToProfileNow(name,requestOpts))
+    .finally(()=>{if(_profileSwitchTail===entry) _profileSwitchTail=null;});
+  _profileSwitchTail=entry;
+  return entry.promise;
+}
+
+function _flushSidebarProfileRefresh(){
+  const gen=_deferredSidebarProfileRefresh;
+  _deferredSidebarProfileRefresh=null;
+  if(gen===null||gen!==_profileSwitchGeneration) return;
+  if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
+  _sessionListSkeletonActive=false;
+  Promise.resolve(renderSessionList()).catch(()=>{});
+  Promise.resolve(_profileSwitchPanelLoad()).catch(()=>{});
+  _refreshProfileSwitchBackground(gen);
+}
+
+async function _switchToProfileNow(name) {
+  const opts=arguments[1]||{};
+
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
   // strand. Four interacting pieces of state cooperate; an edit touching one without
@@ -7110,7 +7139,7 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
-  const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
+  const _openingExistingSidebarSession = !!opts.openingExistingSession;
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
@@ -7142,7 +7171,7 @@ async function switchToProfile(name) {
     S.session.active_stream_id ||
     S.session.pending_user_message
   ));
-  if (_openingExistingSidebarSession && S.session) {
+  if (_openingExistingSidebarSession) {
     // A cross-profile sidebar click is about to load a concrete existing session.
     // Do not create or retag a blank intermediary session in the destination profile.
     sessionInProgress = true;
@@ -7175,7 +7204,7 @@ async function switchToProfile(name) {
     // red error while the real switch completes and renders. The catch block below is
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
-    const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
+    const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify(_openingExistingSidebarSession ? {name, lightweight:true} : {name}), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
@@ -7304,7 +7333,7 @@ async function switchToProfile(name) {
       // cookie switch. Avoid creating/retagging an intermediate blank chat.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
-      await renderSessionList();
+      _deferredSidebarProfileRefresh = _switchGen;
       if (_switchGen !== _profileSwitchGeneration) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
@@ -7366,8 +7395,10 @@ async function switchToProfile(name) {
       showToast(t('profile_switched', name));
     }
 
-    await _profileSwitchPanelLoad();
-    _refreshProfileSwitchBackground(_switchGen);
+    if (!_openingExistingSidebarSession) {
+      await _profileSwitchPanelLoad();
+      _refreshProfileSwitchBackground(_switchGen);
+    }
     return true;
 
   } catch (e) {

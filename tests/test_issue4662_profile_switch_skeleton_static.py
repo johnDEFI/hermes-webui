@@ -21,7 +21,7 @@ CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def _switch_body() -> str:
-    start = PANELS.index("async function switchToProfile(")
+    start = PANELS.index("async function _switchToProfileNow(")
     # grab a generous slice (the function is long); next top-level function after it
     end = PANELS.index("function openProfileCreate(", start)
     return PANELS[start:end]
